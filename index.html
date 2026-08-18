@@ -1,0 +1,1072 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎟️ チケット管理</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;font-family:'Hiragino Sans','Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif;background:#f0f4ff;}
+  input,select,textarea,button{font-family:inherit;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+// ─────────────────────────────────────────────
+// Firebase 初期化
+// ─────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyDi4z7dahHPzrsmlZHSj7o-zZXj0i2fqc0",
+  authDomain: "ticketmaneger.firebaseapp.com",
+  projectId: "ticketmaneger",
+  storageBucket: "ticketmaneger.firebasestorage.app",
+  messagingSenderId: "839002030958",
+  appId: "1:839002030958:web:579dc1d749d74ec8b1777f"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+// ─────────────────────────────────────────────
+// Firestore helpers
+// ─────────────────────────────────────────────
+const COL = { members:"members", events:"events", logs:"logs" };
+
+async function fsGet(col) {
+  try {
+    const snap = await db.collection(col).get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch(e) { console.error("fsGet error", e); return null; }
+}
+
+async function fsSet(col, id, data) {
+  try { await db.collection(col).doc(id).set(data); } catch(e) { console.error("fsSet error", e); }
+}
+
+async function fsDel(col, id) {
+  try { await db.collection(col).doc(id).delete(); } catch(e) { console.error("fsDel error", e); }
+}
+
+// メンバー全件保存（差分で）
+async function saveMembers(members) {
+  const snap = await db.collection(COL.members).get();
+  const existing = snap.docs.map(d => d.id);
+  const newIds = members.map(m => m.id);
+  // 削除されたもの
+  for (const id of existing) {
+    if (!newIds.includes(id)) await fsDel(COL.members, id);
+  }
+  // 追加・更新
+  for (const m of members) {
+    await fsSet(COL.members, m.id, { name: m.name, gender: m.gender });
+  }
+}
+
+// イベント1件保存
+async function saveEvent(ev) {
+  const { id, ...data } = ev;
+  await fsSet(COL.events, id, data);
+}
+
+// イベント削除
+async function deleteEvent(id) {
+  await fsDel(COL.events, id);
+}
+
+// ログ追加
+async function addLog(entry) {
+  try {
+    await db.collection(COL.logs).add({ ...entry, ts: new Date().toISOString() });
+    // 300件超えたら古いものを削除
+    const snap = await db.collection(COL.logs).orderBy("ts","desc").get();
+    if (snap.docs.length > 300) {
+      const toDelete = snap.docs.slice(300);
+      for (const d of toDelete) await fsDel(COL.logs, d.id);
+    }
+  } catch(e) { console.error("addLog error", e); }
+}
+
+// ─────────────────────────────────────────────
+// Seed members
+// ─────────────────────────────────────────────
+const SEED_MEMBERS = [
+  {id:"m1", name:"東田",     gender:"blue"},{id:"m2", name:"水谷し",   gender:"blue"},
+  {id:"m3", name:"山田",     gender:"blue"},{id:"m4", name:"上田",     gender:"blue"},
+  {id:"m5", name:"安達",     gender:"blue"},{id:"m6", name:"金川",     gender:"blue"},
+  {id:"m7", name:"馬場",     gender:"blue"},{id:"m8", name:"足立",     gender:"blue"},
+  {id:"m9", name:"水谷こ",   gender:"blue"},{id:"m10",name:"山崎",     gender:"red" },
+  {id:"m11",name:"奥村",     gender:"blue"},{id:"m12",name:"西村(彰)", gender:"blue"},
+  {id:"m13",name:"西村(俊)", gender:"blue"},{id:"m14",name:"河邊",     gender:"blue"},
+  {id:"m15",name:"小幡",     gender:"blue"},{id:"m16",name:"津田",     gender:"blue"},
+  {id:"m17",name:"中山",     gender:"blue"},{id:"m18",name:"田邊",     gender:"blue"},
+  {id:"m19",name:"小林",     gender:"blue"},{id:"m20",name:"平野",     gender:"blue"},
+  {id:"m21",name:"斉藤",     gender:"blue"},{id:"m22",name:"まさえ",   gender:"red" },
+  {id:"m23",name:"森",       gender:"red" },{id:"m24",name:"上村",     gender:"red" },
+  {id:"m25",name:"伊尾木",   gender:"blue"},{id:"m26",name:"赤井",     gender:"blue"},
+  {id:"m27",name:"難波",     gender:"blue"},{id:"m28",name:"稲林",     gender:"blue"},
+  {id:"m29",name:"しょうこ", gender:"red" },
+];
+
+// ─────────────────────────────────────────────
+// LINE parser
+// ─────────────────────────────────────────────
+function parseLINEText(text, masterMembers) {
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  const results = []; let current = null;
+  for (const line of lines) {
+    if (/^[※➖─\-=＝]{3,}/.test(line)) { if (current) { results.push(current); current = null; } continue; }
+    const mm = line.match(/^([🔵🔴])(.+?)(?:さん|ちゃん)?\s*(申込[⭕️✅ok OK]+)?$/u);
+    if (mm) {
+      if (current) results.push(current);
+      const rawName = mm[2].trim().replace(/さん$|ちゃん$/,"");
+      const gender  = mm[1]==="🔵"?"blue":"red";
+      const applied = !!mm[3];
+      const master  = masterMembers.find(m=>m.name===rawName||rawName.includes(m.name)||m.name.includes(rawName));
+      current = { rawName, gender, applied, companionNo:"", companionName:"", masterId:master?.id||null };
+      continue;
+    }
+    if (current) {
+      const cm = line.match(/^(\d{5,})\s+(.+)$/);
+      if (cm) { current.companionNo = cm[1]; current.companionName = cm[2].trim(); }
+    }
+  }
+  if (current) results.push(current);
+  return results;
+}
+
+function parseCSV(text, masterMembers) {
+  const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+  const results = [];
+  for (let i=1;i<lines.length;i++) {
+    const cols = lines[i].split(",").map(c=>c.trim().replace(/^"|"$/g,""));
+    const [name,genderRaw,companionNo,companionName,participate] = cols;
+    if (!name) continue;
+    const gender = (genderRaw==="女"||genderRaw==="red")?"red":"blue";
+    if (participate==="×"||participate==="x"||participate==="X") continue;
+    const master = masterMembers.find(m=>m.name===name||name.includes(m.name)||m.name.includes(name));
+    results.push({ rawName:name, gender, applied:false, companionNo:companionNo||"", companionName:companionName||"", masterId:master?.id||null });
+  }
+  return results;
+}
+
+const CSV_TEMPLATE = `名前,性別,同行者番号,同行者氏名,参加
+東田,男,,,○
+水谷し,男,20374954,武内優晃,○
+山田,男,20374561,赤木徹也,○
+上田,男,13295855,藤林綾子,○
+安達,男,20374419,米丸真彦,○
+金川,男,20374381,原田雄基,○
+馬場,男,20374362,大成　甚,○
+足立,男,20374112,松岡偉男太,○
+水谷こ,男,20373574,堀田裕美,○
+山崎,女,20373569,堀田恭平,○
+奥村,男,20373521,濱田修央,○
+西村(彰),男,20373176,福岡直樹,○
+西村(俊),男,20372907,有本理久汰,○
+河邊,男,20372906,山口碧菜,○
+小幡,男,20372633,西川浩生,○
+津田,男,20372632,後藤康太,○
+中山,男,20372459,岡崎唯菜,○
+田邊,男,20372368,波多野由紀子,○
+小林,男,20372355,波多野弘之,○
+平野,男,20372256,小池慶周,○
+斉藤,男,20371945,村松夕貴,○
+まさえ,女,20371790,長山祐也,○
+森,女,20371722,立野智美,○
+上村,女,20371741,倉橋慎輔,○
+伊尾木,男,20371622,長谷川恵子,○
+赤井,男,20371613,後藤俊美,○
+難波,男,20371599,脇田圭佑,○
+稲林,男,20371598,後藤雄二,○
+しょうこ,女,20371487,松上瑠希耶,○`;
+
+// ─────────────────────────────────────────────
+// Design tokens
+// ─────────────────────────────────────────────
+const NAVY="#1a1f4e",ACCENT="#4f7ef8",GREEN="#22c55e",RED="#ef4444",GRAY="#64748b",AMBER="#f59e0b";
+const inputStyle={width:"100%",padding:"9px 12px",border:"1.5px solid #dde1f0",borderRadius:8,fontSize:14,outline:"none",boxSizing:"border-box",fontFamily:"inherit",color:"#1e293b"};
+const labelStyle={display:"block",fontSize:12,fontWeight:600,color:GRAY,marginBottom:4};
+
+function btn(v="") {
+  const base={display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",fontWeight:600,fontSize:13,cursor:"pointer",transition:"opacity .15s"};
+  const map={primary:{background:ACCENT,color:"#fff"},danger:{background:RED,color:"#fff"},success:{background:GREEN,color:"#fff"},warning:{background:AMBER,color:"#fff"},ghost:{background:"transparent",color:NAVY,border:"1px solid #dde1f0"},sm:{padding:"5px 10px",fontSize:12}};
+  return v.split(" ").reduce((a,k)=>({...a,...(map[k]||{})}),base);
+}
+
+const STATUS_CONFIG={
+  draft:  {label:"下書き",  color:"gray", next:"open",    nextLabel:"公開する"},
+  open:   {label:"公開中",  color:"blue", next:"lottery", nextLabel:"抽選中へ"},
+  lottery:{label:"抽選中",  color:"amber",next:"done",    nextLabel:"結果確定へ"},
+  done:   {label:"結果確定",color:"green",next:null,      nextLabel:null},
+};
+
+function fmtTime(iso) {
+  const d=new Date(iso);
+  return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+
+// ─────────────────────────────────────────────
+// Shared UI components
+// ─────────────────────────────────────────────
+function Modal({title,children,onClose,wide}) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+         onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{background:"#fff",borderRadius:16,padding:24,width:"100%",maxWidth:wide?680:520,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 24px 64px rgba(0,0,0,.25)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <h2 style={{margin:0,fontSize:17,color:NAVY}}>{title}</h2>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:GRAY}}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Confirm({message,onOk,onCancel}) {
+  return (
+    <Modal title="確認" onClose={onCancel}>
+      <p style={{margin:"0 0 20px",color:"#374151",lineHeight:1.7,whiteSpace:"pre-line"}}>{message}</p>
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+        <button style={btn("ghost")} onClick={onCancel}>キャンセル</button>
+        <button style={btn("primary")} onClick={onOk}>OK</button>
+      </div>
+    </Modal>
+  );
+}
+
+function NameConfirm({name,gender,companionName,message,okLabel,okColor,onOk,onCancel,extra}) {
+  const dotColor=gender==="blue"?"#3b82f6":"#ef4444";
+  return (
+    <Modal title="操作の確認" onClose={onCancel}>
+      <div style={{background:"#f0f4ff",borderRadius:12,padding:"16px 20px",textAlign:"center",marginBottom:18,border:`2px solid ${dotColor}40`}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:4}}>
+          <span style={{display:"inline-block",width:13,height:13,borderRadius:"50%",background:dotColor,flexShrink:0}}/>
+          <span style={{fontSize:28,fontWeight:900,color:NAVY,letterSpacing:1}}>{name}</span>
+        </div>
+        {companionName&&<div style={{fontSize:12,color:GRAY}}>同行者: {companionName}</div>}
+      </div>
+      <p style={{margin:"0 0 6px",color:"#374151",lineHeight:1.7,fontSize:14}}>{message}</p>
+      {extra&&<div style={{marginBottom:4}}>{extra}</div>}
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:20}}>
+        <button style={btn("ghost")} onClick={onCancel}>キャンセル</button>
+        <button style={{...btn("primary"),background:okColor||ACCENT}} onClick={onOk}>{okLabel||"OK"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+function GenderDot({gender}) {
+  return <span style={{display:"inline-block",width:10,height:10,borderRadius:"50%",background:gender==="blue"?"#3b82f6":"#ef4444",marginRight:6,flexShrink:0}}/>;
+}
+
+function Badge({label,color}) {
+  const c={green:{bg:"#dcfce7",text:"#166534"},amber:{bg:"#fef3c7",text:"#92400e"},red:{bg:"#fee2e2",text:"#991b1b"},gray:{bg:"#f1f5f9",text:"#475569"},blue:{bg:"#dbeafe",text:"#1e40af"}}[color]||{bg:"#f1f5f9",text:"#475569"};
+  return <span style={{background:c.bg,color:c.text,borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{label}</span>;
+}
+
+function Tabs({tabs,active,onChange}) {
+  return (
+    <div style={{display:"flex",gap:2,background:"#eef0f8",borderRadius:10,padding:4}}>
+      {tabs.map(t=>(
+        <button key={t.id} onClick={()=>onChange(t.id)}
+          style={{flex:1,padding:"8px 4px",border:"none",borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:600,transition:"all .15s",background:active===t.id?"#fff":"transparent",color:active===t.id?NAVY:GRAY,boxShadow:active===t.id?"0 1px 4px rgba(0,0,0,.1)":"none"}}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ImportModal
+// ─────────────────────────────────────────────
+function ImportModal({members,onImport,onClose}) {
+  const [mode,setMode]=React.useState("line");
+  const [lineText,setLineText]=React.useState("");
+  const [csvText,setCsvText]=React.useState("");
+  const [preview,setPreview]=React.useState(null);
+  const [error,setError]=React.useState("");
+  const [showCsvTpl,setShowCsvTpl]=React.useState(false);
+  const fileRef=React.useRef();
+
+  function analyze() {
+    setError("");
+    let parsed=[];
+    if (mode==="line") {
+      if (!lineText.trim()){setError("テキストを貼り付けてください。");return;}
+      parsed=parseLINEText(lineText,members);
+    } else {
+      if (!csvText.trim()){setError("CSVを読み込んでください。");return;}
+      parsed=parseCSV(csvText,members);
+    }
+    if (parsed.length===0){setError("参加者を読み取れませんでした。フォーマットを確認してください。");return;}
+    setPreview(parsed);
+  }
+
+  function handleFile(e) {
+    const file=e.target.files[0]; if (!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>setCsvText(ev.target.result);
+    reader.readAsText(file,"UTF-8");
+  }
+
+  return (
+    <Modal title="参加者を一括登録" onClose={onClose} wide>
+      {!preview?(
+        <>
+          <div style={{display:"flex",gap:8,marginBottom:16}}>
+            <button style={btn(mode==="line"?"primary sm":"ghost sm")} onClick={()=>setMode("line")}>📋 LINEテキスト</button>
+            <button style={btn(mode==="csv"?"primary sm":"ghost sm")} onClick={()=>setMode("csv")}>📂 CSV</button>
+          </div>
+          {mode==="line"&&(
+            <>
+              <p style={{fontSize:12,color:GRAY,margin:"0 0 8px"}}>LINEメッセージをそのままコピー＆ペーストしてください。</p>
+              <textarea style={{...inputStyle,height:220,resize:"vertical",fontFamily:"monospace",fontSize:12,lineHeight:1.6}}
+                placeholder={"🔵東田　　申込⭕️\n※※※※※※※※\n🔵水谷しさん\n20374954  武内優晃\n※※※※※※※※"}
+                value={lineText} onChange={e=>setLineText(e.target.value)}/>
+            </>
+          )}
+          {mode==="csv"&&(
+            <>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <p style={{fontSize:12,color:GRAY,margin:0}}>CSVファイルをアップロードしてください。</p>
+                <button style={btn("ghost sm")} onClick={()=>setShowCsvTpl(v=>!v)}>📋 テンプレート表示</button>
+              </div>
+              {showCsvTpl&&(
+                <div style={{marginBottom:12,border:"1.5px solid #bfdbfe",borderRadius:10,overflow:"hidden"}}>
+                  <div style={{background:"#eff6ff",padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontSize:12,fontWeight:700,color:"#1e40af"}}>📋 CSVテンプレート</span>
+                    <button style={btn("primary sm")} onClick={()=>{
+                      const ta=document.getElementById("csvTplArea");
+                      if(ta){ta.select();try{document.execCommand("copy");}catch(e){}}
+                      navigator.clipboard?.writeText(CSV_TEMPLATE).catch(()=>{});
+                    }}>コピー</button>
+                  </div>
+                  <textarea id="csvTplArea" readOnly value={CSV_TEMPLATE}
+                    style={{...inputStyle,height:160,fontFamily:"monospace",fontSize:11,lineHeight:1.5,borderRadius:0,border:"none",borderTop:"1px solid #bfdbfe",resize:"none",background:"#f8fafc"}}
+                    onClick={e=>e.target.select()}/>
+                  <div style={{background:"#eff6ff",padding:"6px 12px",fontSize:11,color:"#1e40af"}}>
+                    ↑ コピー → Googleスプレッドシートに貼り付けて編集 → CSVでダウンロード → アップロード
+                  </div>
+                </div>
+              )}
+              <div style={{background:"#f8fafc",border:"2px dashed #dde1f0",borderRadius:10,padding:20,textAlign:"center",marginBottom:12,cursor:"pointer"}}
+                   onClick={()=>fileRef.current.click()}>
+                <div style={{fontSize:28,marginBottom:6}}>📂</div>
+                <div style={{fontSize:13,color:GRAY}}>クリックしてCSVを選択</div>
+                {csvText&&<div style={{fontSize:12,color:GREEN,marginTop:6}}>✅ ファイルを読み込みました</div>}
+              </div>
+              <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={handleFile}/>
+              <div style={{background:"#fffbeb",borderRadius:8,padding:10,fontSize:11,color:"#92400e",border:"1px solid #fde68a"}}>
+                フォーマット: 名前 / 性別（男・女）/ 同行者番号 / 同行者氏名 / 参加（○・×）
+              </div>
+            </>
+          )}
+          {error&&<div style={{background:"#fee2e2",borderRadius:8,padding:10,fontSize:12,color:"#991b1b",marginTop:12}}>{error}</div>}
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:16}}>
+            <button style={btn("ghost")} onClick={onClose}>キャンセル</button>
+            <button style={btn("primary")} onClick={analyze}>解析する →</button>
+          </div>
+        </>
+      ):(
+        <>
+          <div style={{background:"#f0fdf4",borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:8,border:"1px solid #86efac"}}>
+            <span style={{fontSize:16}}>✅</span>
+            <span style={{fontWeight:700,color:"#166534"}}>{preview.length}名を読み取りました</span>
+            <button style={{...btn("ghost sm"),marginLeft:"auto"}} onClick={()=>setPreview(null)}>← 戻る</button>
+          </div>
+          <div style={{maxHeight:320,overflowY:"auto",display:"grid",gap:6,marginBottom:16}}>
+            {preview.map((p,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:8,background:"#f8fafc",border:"1px solid #e8ebf5",borderRadius:8,padding:"8px 12px"}}>
+                <GenderDot gender={p.gender}/>
+                <span style={{fontWeight:700,fontSize:13,minWidth:80}}>{p.rawName}</span>
+                {p.applied&&<Badge label="申込⭕️" color="green"/>}
+                {!p.masterId&&<Badge label="未マッチ" color="amber"/>}
+                {p.companionName&&<span style={{fontSize:11,color:GRAY}}>同行: {p.companionNo} {p.companionName}</span>}
+              </div>
+            ))}
+          </div>
+          {preview.some(p=>!p.masterId)&&(
+            <div style={{background:"#fffbeb",borderRadius:8,padding:10,fontSize:12,color:"#92400e",border:"1px solid #fde68a",marginBottom:12}}>
+              ⚠️「未マッチ」の方はマスター未登録です。取り込むと新しい参加者として追加されます。
+            </div>
+          )}
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <button style={btn("ghost")} onClick={onClose}>キャンセル</button>
+            <button style={btn("primary")} onClick={()=>onImport(preview)}>この内容で登録する</button>
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Tab: 申込状況
+// ─────────────────────────────────────────────
+function ApplyView({events,members,onUpdateEvent}) {
+  const [selEv,setSelEv]=React.useState(null);
+  const [confirm,setConfirm]=React.useState(null);
+  const memberMap=Object.fromEntries(members.map(m=>[m.id,m]));
+  const visible=events.filter(e=>e.status!=="draft");
+  React.useEffect(()=>{ if(!selEv&&visible.length>0) setSelEv(visible[0].id); },[events]);
+  const ev=events.find(e=>e.id===selEv);
+
+  async function doToggle() {
+    if (!confirm||!ev) return;
+    const {memberId,newVal}=confirm;
+    const m=memberMap[memberId]||{name:confirm.rawName};
+    const next={...ev,participants:ev.participants.map(p=>p.memberId===memberId?{...p,applied:newVal}:p)};
+    await onUpdateEvent(next);
+    await addLog({type:"apply",eventTitle:ev.title,memberName:m.name,action:newVal?"申込完了":"申込取消"});
+    setConfirm(null);
+  }
+
+  const applied=ev?.participants.filter(p=>p.applied).length||0;
+  const total=ev?.participants.length||0;
+  const pct=total?Math.round(applied/total*100):0;
+
+  return (
+    <div>
+      <h3 style={{margin:"0 0 14px",fontSize:16,color:NAVY}}>📋 申込状況</h3>
+      {visible.length===0?(
+        <div style={{textAlign:"center",padding:40,background:"#f8fafc",borderRadius:12,color:GRAY}}>公開中のイベントがありません。</div>
+      ):(
+        <>
+          <div style={{marginBottom:16}}>
+            <label style={labelStyle}>イベントを選択</label>
+            <select style={inputStyle} value={selEv||""} onChange={e=>setSelEv(e.target.value)}>
+              {visible.map(e=><option key={e.id} value={e.id}>{e.date} {e.title}</option>)}
+            </select>
+          </div>
+          {ev&&(<>
+            <div style={{background:NAVY,borderRadius:12,padding:14,marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{color:"#94a3b8",fontSize:11,marginBottom:2}}>申込済み / 合計</div>
+                <div style={{color:"#fff",fontSize:22,fontWeight:800}}>{applied} <span style={{fontSize:14,fontWeight:400}}>/ {total}名</span></div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{color:"#94a3b8",fontSize:11,marginBottom:2}}>未申込</div>
+                <div style={{color:total-applied>0?"#fbbf24":GREEN,fontSize:22,fontWeight:800}}>{total-applied}名</div>
+              </div>
+            </div>
+            <div style={{height:8,background:"#e8ebf5",borderRadius:99,marginBottom:6,overflow:"hidden"}}>
+              <div style={{height:"100%",background:GREEN,borderRadius:99,width:`${pct}%`,transition:"width .4s"}}/>
+            </div>
+            <div style={{fontSize:11,color:GRAY,textAlign:"right",marginBottom:16}}>{pct}% 完了</div>
+            <div style={{marginBottom:12,padding:10,background:"#fffbeb",borderRadius:8,fontSize:12,color:"#92400e",border:"1px solid #fde68a"}}>
+              ⚠️ 自分の名前をタップして操作してください。確認画面で名前を必ずご確認ください。
+            </div>
+            <div style={{display:"grid",gap:8}}>
+              {ev.participants.map(p=>{
+                const m=memberMap[p.memberId]||{name:p.rawName||"?",gender:p.gender||"blue"};
+                return (
+                  <div key={p.memberId||p.rawName}
+                    style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",background:p.applied?"#f0fdf4":"#fff",border:`1.5px solid ${p.applied?"#86efac":"#e8ebf5"}`,borderRadius:10,padding:"12px 14px",transition:"all .15s"}}
+                    onClick={()=>setConfirm({memberId:p.memberId,rawName:m.name,newVal:!p.applied})}>
+                    <GenderDot gender={m.gender}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:14,color:"#1e293b"}}>{m.name}</div>
+                      {p.companionName&&<div style={{fontSize:11,color:GRAY}}>同行: {p.companionNo} {p.companionName}</div>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      {p.applied?<Badge label="申込⭕️" color="green"/>:<Badge label="未申込" color="amber"/>}
+                      <div style={{width:36,height:20,borderRadius:99,position:"relative",background:p.applied?GREEN:"#d1d5db",transition:"background .2s",flexShrink:0}}>
+                        <div style={{position:"absolute",top:2,borderRadius:"50%",width:16,height:16,background:"#fff",left:p.applied?18:2,transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.2)"}}/>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>)}
+        </>
+      )}
+      {confirm&&ev&&(()=>{
+        const m=memberMap[confirm.memberId]||{name:confirm.rawName,gender:"blue"};
+        const p=ev.participants.find(pp=>pp.memberId===confirm.memberId);
+        return <NameConfirm name={m.name} gender={m.gender} companionName={p?.companionName}
+          message={confirm.newVal?"チケット申込を「完了」に変更しますか？":"申込状況を「未申込」に戻しますか？"}
+          okLabel={confirm.newVal?"申込完了にする":"取消にする"} okColor={confirm.newVal?GREEN:RED}
+          onOk={doToggle} onCancel={()=>setConfirm(null)}/>;
+      })()}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Tab: 抽選結果
+// ─────────────────────────────────────────────
+function ResultView({events,members,onUpdateEvent}) {
+  const [selEv,setSelEv]=React.useState(null);
+  const [mode,setMode]=React.useState("view");
+  const [confirm,setConfirm]=React.useState(null);
+  const [seatDraft,setSeat]=React.useState("");
+  const memberMap=Object.fromEntries(members.map(m=>[m.id,m]));
+  const visible=events.filter(e=>e.status!=="draft");
+  React.useEffect(()=>{ if(!selEv&&visible.length>0) setSelEv(visible[0].id); },[events]);
+  const ev=events.find(e=>e.id===selEv);
+
+  async function doResult() {
+    if (!confirm||!ev) return;
+    const {memberId,result,seat}=confirm;
+    const m=memberMap[memberId]||{name:confirm.rawName};
+    const next={...ev,participants:ev.participants.map(p=>p.memberId===memberId?{...p,result,seat:result==="win"?seat:""}:p)};
+    await onUpdateEvent(next);
+    await addLog({type:"result",eventTitle:ev.title,memberName:m.name,action:result==="win"?`当選登録（座席:${seat}）`:result==="lose"?"落選登録":"結果取消"});
+    setConfirm(null); setSeat("");
+  }
+
+  const wins=ev?.participants.filter(p=>p.result==="win")||[];
+  const loses=ev?.participants.filter(p=>p.result==="lose")||[];
+  const pend=ev?.participants.filter(p=>p.result===null)||[];
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <h3 style={{margin:0,fontSize:16,color:NAVY}}>🎟️ 抽選結果</h3>
+        <div style={{display:"flex",gap:6}}>
+          <button style={btn(mode==="view"?"primary sm":"ghost sm")} onClick={()=>setMode("view")}>閲覧</button>
+          <button style={btn(mode==="input"?"primary sm":"ghost sm")} onClick={()=>setMode("input")}>結果入力</button>
+        </div>
+      </div>
+      {visible.length===0?(
+        <div style={{textAlign:"center",padding:40,background:"#f8fafc",borderRadius:12,color:GRAY}}>公開中のイベントがありません。</div>
+      ):(
+        <>
+          <div style={{marginBottom:16}}>
+            <label style={labelStyle}>イベントを選択</label>
+            <select style={inputStyle} value={selEv||""} onChange={e=>setSelEv(e.target.value)}>
+              {visible.map(e=><option key={e.id} value={e.id}>{e.date} {e.title}</option>)}
+            </select>
+          </div>
+          {ev&&(<>
+            {mode==="input"&&(
+              <>
+                <div style={{marginBottom:12,padding:10,background:"#fffbeb",borderRadius:8,fontSize:12,color:"#92400e",border:"1px solid #fde68a"}}>
+                  ⚠️ 自分の名前をタップして結果を入力してください。
+                </div>
+                <div style={{display:"grid",gap:8}}>
+                  {ev.participants.map(p=>{
+                    const m=memberMap[p.memberId]||{name:p.rawName||"?",gender:p.gender||"blue"};
+                    return (
+                      <div key={p.memberId||p.rawName} style={{background:"#f8fafc",border:`1.5px solid ${p.result==="win"?"#86efac":p.result==="lose"?"#fca5a5":"#e8ebf5"}`,borderRadius:10,padding:"12px 14px"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                          <GenderDot gender={m.gender}/><span style={{fontWeight:700,fontSize:14,flex:1}}>{m.name}</span>
+                          {p.result==="win"&&<Badge label="🎉 当選" color="green"/>}
+                          {p.result==="lose"&&<Badge label="落選" color="red"/>}
+                          {p.result===null&&<Badge label="未入力" color="gray"/>}
+                        </div>
+                        {p.companionName&&<div style={{fontSize:11,color:GRAY,marginBottom:8}}>同行: {p.companionNo} {p.companionName}</div>}
+                        {p.result==="win"&&p.seat&&<div style={{fontSize:12,color:"#166534",marginBottom:8}}>座席番号: <strong>{p.seat}</strong></div>}
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                          <button style={btn("success sm")} onClick={()=>{setSeat(p.seat||"");setConfirm({memberId:p.memberId,rawName:m.name,result:"win",seat:p.seat||""});}}>🎉 当選</button>
+                          <button style={btn("danger sm")} onClick={()=>setConfirm({memberId:p.memberId,rawName:m.name,result:"lose",seat:""})}>✗ 落選</button>
+                          {p.result!==null&&<button style={btn("ghost sm")} onClick={()=>setConfirm({memberId:p.memberId,rawName:m.name,result:null,seat:""})}>― 取消</button>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            {mode==="view"&&(
+              <>
+                {wins.length===0&&loses.length===0&&pend.length===0&&<p style={{color:GRAY,textAlign:"center",padding:40}}>参加者がいません。</p>}
+                {wins.length>0&&(
+                  <div style={{marginBottom:20}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"#166534",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+                      🎉 当選 <span style={{background:"#dcfce7",borderRadius:99,padding:"1px 10px",fontSize:12}}>{wins.length}名</span>
+                    </div>
+                    <div style={{display:"grid",gap:8}}>
+                      {wins.map(p=>{const m=memberMap[p.memberId]||{name:p.rawName,gender:"blue"};return(
+                        <div key={p.memberId} style={{background:"linear-gradient(135deg,#f0fdf4,#dcfce7)",border:"1.5px solid #86efac",borderRadius:12,padding:14}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                            <GenderDot gender={m.gender}/><span style={{fontWeight:700,fontSize:15}}>{m.name}</span>
+                            <span style={{marginLeft:"auto",fontSize:11,color:"#166534"}}>🎉 当選</span>
+                          </div>
+                          {p.companionName&&<div style={{fontSize:12,color:GRAY,marginBottom:8}}>同行者: {p.companionNo} {p.companionName}</div>}
+                          {p.seat?(<div style={{background:"#fff",borderRadius:8,padding:"8px 14px",display:"inline-block",border:"1px solid #86efac"}}>
+                            <div style={{fontSize:11,color:GRAY}}>座席番号</div>
+                            <div style={{fontSize:20,fontWeight:900,color:NAVY,letterSpacing:2}}>{p.seat}</div>
+                          </div>):<div style={{fontSize:12,color:"#92400e"}}>座席番号：未入力</div>}
+                        </div>
+                      );})}
+                    </div>
+                  </div>
+                )}
+                {loses.length>0&&(
+                  <div style={{marginBottom:20}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"#991b1b",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+                      ✗ 落選 <span style={{background:"#fee2e2",borderRadius:99,padding:"1px 10px",fontSize:12}}>{loses.length}名</span>
+                    </div>
+                    <div style={{display:"grid",gap:6}}>
+                      {loses.map(p=>{const m=memberMap[p.memberId]||{name:p.rawName,gender:"blue"};return(
+                        <div key={p.memberId} style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
+                          <GenderDot gender={m.gender}/><span style={{fontWeight:600,fontSize:14}}>{m.name}</span>
+                          {p.companionName&&<span style={{fontSize:12,color:GRAY}}>/ {p.companionName}</span>}
+                          <Badge label="落選" color="red"/>
+                        </div>
+                      );})}
+                    </div>
+                  </div>
+                )}
+                {pend.length>0&&(
+                  <div>
+                    <div style={{fontSize:13,fontWeight:700,color:GRAY,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+                      ⏳ 結果待ち <span style={{background:"#f1f5f9",borderRadius:99,padding:"1px 10px",fontSize:12}}>{pend.length}名</span>
+                    </div>
+                    <div style={{display:"grid",gap:6}}>
+                      {pend.map(p=>{const m=memberMap[p.memberId]||{name:p.rawName,gender:"blue"};return(
+                        <div key={p.memberId} style={{background:"#f8fafc",border:"1px solid #e8ebf5",borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
+                          <GenderDot gender={m.gender}/><span style={{fontWeight:600,fontSize:14}}>{m.name}</span>
+                          {p.companionName&&<span style={{fontSize:12,color:GRAY}}>/ {p.companionName}</span>}
+                          <Badge label="結果待ち" color="gray"/>
+                        </div>
+                      );})}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </>)}
+        </>
+      )}
+      {confirm&&ev&&confirm.result==="win"&&(()=>{
+        const m=memberMap[confirm.memberId]||{name:confirm.rawName,gender:"blue"};
+        const p=ev.participants.find(pp=>pp.memberId===confirm.memberId);
+        return <NameConfirm name={m.name} gender={m.gender} companionName={p?.companionName}
+          message="当選を登録します。座席番号を入力してください。" okLabel="当選を登録する" okColor={GREEN}
+          onOk={doResult} onCancel={()=>{setConfirm(null);setSeat("");}}
+          extra={<div style={{marginTop:12}}><label style={labelStyle}>座席番号</label>
+            <input style={inputStyle} value={seatDraft} placeholder="例: A-12" autoFocus
+              onChange={e=>{setSeat(e.target.value);setConfirm(c=>({...c,seat:e.target.value}));}}/></div>}/>;
+      })()}
+      {confirm&&ev&&confirm.result==="lose"&&(()=>{
+        const m=memberMap[confirm.memberId]||{name:confirm.rawName,gender:"blue"};
+        const p=ev.participants.find(pp=>pp.memberId===confirm.memberId);
+        return <NameConfirm name={m.name} gender={m.gender} companionName={p?.companionName}
+          message="落選を登録します。よろしいですか？" okLabel="落選を登録する" okColor={RED}
+          onOk={doResult} onCancel={()=>setConfirm(null)}/>;
+      })()}
+      {confirm&&ev&&confirm.result===null&&(()=>{
+        const m=memberMap[confirm.memberId]||{name:confirm.rawName,gender:"blue"};
+        const p=ev.participants.find(pp=>pp.memberId===confirm.memberId);
+        return <NameConfirm name={m.name} gender={m.gender} companionName={p?.companionName}
+          message="入力済みの結果を取り消します。よろしいですか？" okLabel="取り消す" okColor={GRAY}
+          onOk={doResult} onCancel={()=>setConfirm(null)}/>;
+      })()}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Admin: EventManager
+// ─────────────────────────────────────────────
+function EventManager({events,members,setMembers,onUpdateEvent,onDeleteEvent,onCreateEvent}) {
+  const [view,setView]=React.useState("list");
+  const [target,setTarget]=React.useState(null);
+  const [showNew,setShowNew]=React.useState(false);
+  const [showImport,setShowImport]=React.useState(false);
+  const [newForm,setNewForm]=React.useState({title:"",date:"",time:"",venue:"",deadline:""});
+  const [delId,setDelId]=React.useState(null);
+  const [pendingImport,setPendingImport]=React.useState(null);
+
+  async function createEvent(participants=[]) {
+    if (!newForm.title.trim()||!newForm.date) return;
+    const ev={id:"e"+Date.now(),...newForm,status:"draft",participants};
+    await onCreateEvent(ev);
+    setShowNew(false); setPendingImport(null);
+    setNewForm({title:"",date:"",time:"",venue:"",deadline:""});
+  }
+
+  function handleImport(parsed) {
+    const newMems=[...members];
+    const participants=parsed.map(p=>{
+      let mid=p.masterId;
+      if (!mid) {
+        const ex=newMems.find(m=>m.name===p.rawName);
+        if (ex){mid=ex.id;}
+        else{mid="m"+Date.now()+Math.random().toString(36).slice(2,6);newMems.push({id:mid,name:p.rawName,gender:p.gender});}
+      }
+      return {memberId:mid,companionNo:p.companionNo,companionName:p.companionName,applied:p.applied,result:null,seat:""};
+    });
+    if (newMems.length!==members.length) setMembers(newMems);
+    setPendingImport(participants);
+    setShowImport(false);
+  }
+
+  async function advanceStatus(ev) {
+    const next=STATUS_CONFIG[ev.status]?.next;
+    if (!next) return;
+    await onUpdateEvent({...ev,status:next});
+  }
+
+  if (view==="edit"&&target)
+    return <EventEdit event={target} members={members}
+      onSave={async ev=>{await onUpdateEvent(ev);setView("list");}}
+      onBack={()=>setView("list")}/>;
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0,fontSize:16,color:NAVY}}>⚙️ イベント管理</h3>
+        <button style={btn("primary sm")} onClick={()=>setShowNew(true)}>＋ 新規作成</button>
+      </div>
+      <div style={{display:"grid",gap:12}}>
+        {events.length===0&&<p style={{color:GRAY,textAlign:"center",padding:40,background:"#f8fafc",borderRadius:12}}>イベントがありません。</p>}
+        {events.map(ev=>{
+          const sc=STATUS_CONFIG[ev.status]||STATUS_CONFIG.draft;
+          const applied=ev.participants.filter(p=>p.applied).length;
+          return (
+            <div key={ev.id} style={{background:"#f8fafc",border:`1.5px solid ${ev.status==="draft"?"#e2e8f0":"#dde1f0"}`,borderRadius:12,padding:16,opacity:ev.status==="draft"?0.85:1}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:10}}>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+                    <Badge label={sc.label} color={sc.color}/>
+                    {ev.status==="draft"&&<Badge label="👁 参加者には非表示" color="gray"/>}
+                    <span style={{fontSize:11,color:GRAY}}>申込 {applied}/{ev.participants.length}名</span>
+                  </div>
+                  <div style={{fontWeight:700,fontSize:15,color:NAVY,marginBottom:2}}>{ev.title}</div>
+                  <div style={{fontSize:12,color:GRAY}}>📅 {ev.date} {ev.time}　📍 {ev.venue}{ev.deadline&&<span>　⏰ {ev.deadline}まで</span>}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {sc.next&&(
+                  <button style={btn(`${ev.status==="draft"?"primary":"warning"} sm`)} onClick={()=>advanceStatus(ev)}>
+                    {ev.status==="draft"?"🚀 公開する":`→ ${sc.nextLabel}`}
+                  </button>
+                )}
+                <button style={btn("ghost sm")} onClick={()=>{setTarget(ev);setView("edit");}}>✏️ 参加者編集</button>
+                <button style={{...btn("ghost sm"),color:RED,borderColor:"#fecaca",marginLeft:"auto"}} onClick={()=>setDelId(ev.id)}>削除</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {showNew&&(
+        <Modal title="新規イベント作成" onClose={()=>{setShowNew(false);setPendingImport(null);}}>
+          <div style={{display:"grid",gap:14}}>
+            {[["タイトル","title","例: BT 青木PDCM","text"],["開催日","date","","date"],
+              ["時間","time","例: 13:00-15:00","text"],["会場","venue","例: 尼崎中小企業センター","text"],
+              ["申込期限","deadline","","date"]].map(([lbl,key,ph,type])=>(
+              <div key={key}>
+                <label style={labelStyle}>{lbl}</label>
+                <input type={type} style={inputStyle} placeholder={ph} value={newForm[key]}
+                  onChange={e=>setNewForm(f=>({...f,[key]:e.target.value}))}/>
+              </div>
+            ))}
+            <div style={{borderTop:"1px solid #e8ebf5",paddingTop:14}}>
+              <label style={labelStyle}>参加者登録</label>
+              {pendingImport?(
+                <div style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:8,padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{color:"#166534",fontWeight:700}}>✅ {pendingImport.length}名を読み込み済み</span>
+                  <button style={{...btn("ghost sm"),marginLeft:"auto"}} onClick={()=>setShowImport(true)}>変更</button>
+                </div>
+              ):(
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <button style={btn("ghost sm")} onClick={()=>setShowImport(true)}>📋 LINEテキスト / CSV</button>
+                  <span style={{fontSize:12,color:GRAY,alignSelf:"center"}}>※ 後から手動編集も可</span>
+                </div>
+              )}
+            </div>
+            <p style={{fontSize:12,color:GRAY,margin:0,background:"#f8fafc",borderRadius:8,padding:10}}>
+              💡 作成後は「下書き」状態です。準備ができたら「🚀 公開する」で公開してください。
+            </p>
+            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+              <button style={btn("ghost")} onClick={()=>{setShowNew(false);setPendingImport(null);}}>キャンセル</button>
+              <button style={btn("primary")} onClick={()=>createEvent(pendingImport||members.map(m=>({memberId:m.id,companionNo:"",companionName:"",applied:false,result:null,seat:""})))}>
+                作成する（下書き）
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {showImport&&<ImportModal members={members} onImport={handleImport} onClose={()=>setShowImport(false)}/>}
+      {delId&&<Confirm message={"このイベントを削除しますか？\n申込状況・抽選結果も全て失われます。"}
+        onOk={async()=>{await onDeleteEvent(delId);setDelId(null);}} onCancel={()=>setDelId(null)}/>}
+    </div>
+  );
+}
+
+function EventEdit({event,members,onSave,onBack}) {
+  const [ev,setEv]=React.useState(JSON.parse(JSON.stringify(event)));
+  const included=new Set(ev.participants.map(p=>p.memberId));
+  function toggle(mid) {
+    if(included.has(mid)) setEv(e=>({...e,participants:e.participants.filter(p=>p.memberId!==mid)}));
+    else setEv(e=>({...e,participants:[...e.participants,{memberId:mid,companionNo:"",companionName:"",applied:false,result:null,seat:""}]}));
+  }
+  function upd(mid,field,val){setEv(e=>({...e,participants:e.participants.map(p=>p.memberId===mid?{...p,[field]:val}:p)}));}
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
+        <button style={btn("ghost sm")} onClick={onBack}>← 戻る</button>
+        <h3 style={{margin:0,fontSize:15,color:NAVY}}>参加者編集: {ev.title}</h3>
+      </div>
+      <div style={{display:"grid",gap:8}}>
+        {members.map(m=>{
+          const p=ev.participants.find(pp=>pp.memberId===m.id);
+          const isIn=included.has(m.id);
+          return (
+            <div key={m.id} style={{border:`1.5px solid ${isIn?"#bfdbfe":"#e8ebf5"}`,background:isIn?"#f0f7ff":"#fafafa",borderRadius:10,padding:12}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <input type="checkbox" checked={isIn} onChange={()=>toggle(m.id)} style={{width:16,height:16,cursor:"pointer",accentColor:ACCENT}}/>
+                <GenderDot gender={m.gender}/><span style={{fontWeight:600,fontSize:14,flex:1}}>{m.name}</span>
+              </div>
+              {isIn&&p&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:10}}>
+                  <div><label style={labelStyle}>同行者番号</label>
+                    <input style={{...inputStyle,fontSize:13}} value={p.companionNo} placeholder="例: 20374954"
+                      onChange={e=>upd(m.id,"companionNo",e.target.value)}/></div>
+                  <div><label style={labelStyle}>同行者氏名</label>
+                    <input style={{...inputStyle,fontSize:13}} value={p.companionName} placeholder="例: 武内優晃"
+                      onChange={e=>upd(m.id,"companionName",e.target.value)}/></div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{position:"sticky",bottom:0,background:"#fff",paddingTop:16,marginTop:16,borderTop:"1px solid #e8ebf5"}}>
+        <button style={{...btn("primary"),width:"100%"}} onClick={()=>onSave(ev)}>💾 保存する</button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Admin: MemberMaster
+// ─────────────────────────────────────────────
+function MemberMaster({members,setMembers}) {
+  const [showAdd,setShowAdd]=React.useState(false);
+  const [form,setForm]=React.useState({name:"",gender:"blue"});
+  const [delId,setDelId]=React.useState(null);
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0,fontSize:16,color:NAVY}}>👥 メンバー管理 <span style={{color:GRAY,fontWeight:400,fontSize:13}}>（{members.length}名）</span></h3>
+        <button style={btn("primary sm")} onClick={()=>setShowAdd(true)}>＋ 追加</button>
+      </div>
+      <div style={{display:"grid",gap:8}}>
+        {members.map(m=>(
+          <div key={m.id} style={{display:"flex",alignItems:"center",background:"#f8fafc",borderRadius:10,padding:"10px 14px",border:"1px solid #e8ebf5"}}>
+            <GenderDot gender={m.gender}/>
+            <span style={{flex:1,fontWeight:600,fontSize:14}}>{m.name}</span>
+            <Badge label={m.gender==="blue"?"🔵 男性":"🔴 女性"} color={m.gender==="blue"?"blue":"red"}/>
+            <button onClick={()=>setDelId(m.id)} style={{...btn("ghost sm"),marginLeft:8,color:RED,borderColor:"#fecaca"}}>削除</button>
+          </div>
+        ))}
+      </div>
+      {showAdd&&(
+        <Modal title="メンバーを追加" onClose={()=>setShowAdd(false)}>
+          <div style={{display:"grid",gap:14}}>
+            <div><label style={labelStyle}>名前</label>
+              <input style={inputStyle} value={form.name} autoFocus onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="例: 田中"/></div>
+            <div><label style={labelStyle}>性別</label>
+              <select style={inputStyle} value={form.gender} onChange={e=>setForm(f=>({...f,gender:e.target.value}))}>
+                <option value="blue">🔵 男性</option><option value="red">🔴 女性</option>
+              </select></div>
+            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+              <button style={btn("ghost")} onClick={()=>setShowAdd(false)}>キャンセル</button>
+              <button style={btn("primary")} onClick={async()=>{
+                if(!form.name.trim())return;
+                const next=[...members,{id:"m"+Date.now(),name:form.name.trim(),gender:form.gender}];
+                await setMembers(next);setShowAdd(false);setForm({name:"",gender:"blue"});
+              }}>追加する</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {delId&&<Confirm message={`「${members.find(m=>m.id===delId)?.name}」をマスターから削除しますか？`}
+        onOk={async()=>{await setMembers(members.filter(m=>m.id!==delId));setDelId(null);}} onCancel={()=>setDelId(null)}/>}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Admin: LogView
+// ─────────────────────────────────────────────
+function LogView({logs}) {
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0,fontSize:16,color:NAVY}}>📜 操作ログ</h3>
+        <span style={{fontSize:12,color:GRAY}}>{logs.length}件</span>
+      </div>
+      {logs.length===0?(
+        <p style={{color:GRAY,textAlign:"center",padding:40,background:"#f8fafc",borderRadius:12}}>操作履歴がありません。</p>
+      ):(
+        <div style={{display:"grid",gap:8}}>
+          {logs.map((l,i)=>(
+            <div key={i} style={{background:"#f8fafc",border:"1px solid #e8ebf5",borderRadius:10,padding:"10px 14px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                <span style={{fontSize:12,fontWeight:700,color:NAVY}}>{l.type==="apply"?"📋 申込":"🎟️ 抽選結果"}</span>
+                <span style={{fontSize:11,color:GRAY,marginLeft:"auto"}}>{fmtTime(l.ts)}</span>
+              </div>
+              <div style={{fontSize:13,color:"#1e293b"}}><strong style={{fontSize:15}}>{l.memberName}</strong>　{l.action}</div>
+              <div style={{fontSize:11,color:GRAY,marginTop:2}}>{l.eventTitle}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Root App
+// ─────────────────────────────────────────────
+function App() {
+  const [members,setMembersState]=React.useState([]);
+  const [events, setEventsState] =React.useState([]);
+  const [logs,   setLogsState]   =React.useState([]);
+  const [tab,    setTab]         =React.useState("apply");
+  const [adminTab,setAdminTab]   =React.useState("events");
+  const [isAdmin,setIsAdmin]     =React.useState(false);
+  const [loaded, setLoaded]      =React.useState(false);
+  const [error,  setError]       =React.useState(null);
+  const [tapCount,setTapCount]   =React.useState(0);
+
+  // ── Firestore リアルタイム購読 ──
+  React.useEffect(()=>{
+    let unsubMembers, unsubEvents, unsubLogs;
+    async function init() {
+      try {
+        // membersが空ならSeedを投入
+        const mSnap=await db.collection(COL.members).get();
+        if (mSnap.empty) {
+          for (const m of SEED_MEMBERS) {
+            await db.collection(COL.members).doc(m.id).set({name:m.name,gender:m.gender});
+          }
+        }
+        // リアルタイム購読開始
+        unsubMembers=db.collection(COL.members).onSnapshot(snap=>{
+          setMembersState(snap.docs.map(d=>({id:d.id,...d.data()})));
+        });
+        unsubEvents=db.collection(COL.events).onSnapshot(snap=>{
+          setEventsState(snap.docs.map(d=>({id:d.id,...d.data()}))
+            .sort((a,b)=>a.date<b.date?1:-1));
+        });
+        unsubLogs=db.collection(COL.logs).orderBy("ts","desc").limit(300).onSnapshot(snap=>{
+          setLogsState(snap.docs.map(d=>({id:d.id,...d.data()})));
+        });
+        setLoaded(true);
+      } catch(e) {
+        console.error(e);
+        setError("Firestoreへの接続に失敗しました。\nFirebaseの設定とセキュリティルールを確認してください。");
+        setLoaded(true);
+      }
+    }
+    init();
+    return ()=>{ unsubMembers?.(); unsubEvents?.(); unsubLogs?.(); };
+  },[]);
+
+  // ── データ操作関数 ──
+  async function setMembers(next) {
+    setMembersState(next);
+    await saveMembers(next);
+  }
+
+  async function onUpdateEvent(ev) {
+    setEventsState(prev=>prev.map(e=>e.id===ev.id?ev:e));
+    await saveEvent(ev);
+  }
+
+  async function onDeleteEvent(id) {
+    setEventsState(prev=>prev.filter(e=>e.id!==id));
+    await deleteEvent(id);
+  }
+
+  async function onCreateEvent(ev) {
+    setEventsState(prev=>[ev,...prev]);
+    await saveEvent(ev);
+  }
+
+  function handleLogoTap() {
+    const next=tapCount+1; setTapCount(next);
+    if(next>=5){setIsAdmin(v=>!v);setTapCount(0);}
+  }
+
+  const USER_TABS =[{id:"apply",label:"📋 申込状況"},{id:"result",label:"🎟️ 抽選結果"}];
+  const ADMIN_TABS=[{id:"events",label:"⚙️ イベント"},{id:"members",label:"👥 メンバー"},{id:"logs",label:"📜 ログ"}];
+
+  if (!loaded) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f0f4ff"}}>
+      <div style={{textAlign:"center",color:NAVY}}>
+        <div style={{fontSize:32,marginBottom:12}}>🎟️</div>
+        <div style={{fontSize:16}}>読み込み中...</div>
+      </div>
+    </div>
+  );
+
+  if (error) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f0f4ff",padding:24}}>
+      <div style={{background:"#fff",borderRadius:16,padding:24,maxWidth:400,textAlign:"center",boxShadow:"0 4px 24px rgba(0,0,0,.1)"}}>
+        <div style={{fontSize:32,marginBottom:12}}>⚠️</div>
+        <div style={{fontSize:15,color:"#991b1b",lineHeight:1.7,whiteSpace:"pre-line"}}>{error}</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",background:"#f0f4ff",fontFamily:"'Hiragino Sans','Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif"}}>
+      <div style={{background:NAVY,padding:"14px 20px",display:"flex",alignItems:"center",gap:12,position:"sticky",top:0,zIndex:100,boxShadow:"0 2px 12px rgba(0,0,0,.2)"}}>
+        <span style={{fontSize:22,cursor:"pointer",userSelect:"none"}} onClick={handleLogoTap}>🎟️</span>
+        <div style={{flex:1}}>
+          <div style={{color:"#fff",fontWeight:800,fontSize:16,letterSpacing:.5}}>チケット管理</div>
+          <div style={{color:"#94a3b8",fontSize:11}}>Ticket Manager</div>
+        </div>
+        {isAdmin&&(
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{background:"#f59e0b",color:"#fff",borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:700}}>⚙️ 管理者</span>
+            <button style={{...btn("ghost sm"),color:"#fff",borderColor:"rgba(255,255,255,.3)",fontSize:11}} onClick={()=>setIsAdmin(false)}>終了</button>
+          </div>
+        )}
+      </div>
+
+      <div style={{maxWidth:640,margin:"0 auto",padding:"16px 12px 120px"}}>
+        <Tabs tabs={USER_TABS} active={tab} onChange={setTab}/>
+        <div style={{marginTop:20}}>
+          {tab==="apply" &&<ApplyView  events={events} members={members} onUpdateEvent={onUpdateEvent}/>}
+          {tab==="result"&&<ResultView events={events} members={members} onUpdateEvent={onUpdateEvent}/>}
+        </div>
+
+        {isAdmin&&(
+          <div style={{marginTop:32,paddingTop:24,borderTop:"2px dashed #fbbf24"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+              <span style={{fontSize:13,fontWeight:700,color:"#92400e",background:"#fef3c7",borderRadius:8,padding:"4px 12px"}}>⚙️ 管理者エリア</span>
+            </div>
+            <Tabs tabs={ADMIN_TABS} active={adminTab} onChange={setAdminTab}/>
+            <div style={{marginTop:20}}>
+              {adminTab==="events" &&<EventManager events={events} members={members} setMembers={setMembers} onUpdateEvent={onUpdateEvent} onDeleteEvent={onDeleteEvent} onCreateEvent={onCreateEvent}/>}
+              {adminTab==="members"&&<MemberMaster members={members} setMembers={setMembers}/>}
+              {adminTab==="logs"   &&<LogView logs={logs}/>}
+            </div>
+          </div>
+        )}
+
+        {!isAdmin&&(
+          <div style={{textAlign:"center",marginTop:40}}>
+            <p style={{fontSize:11,color:"#cbd5e1"}}>管理者の方はロゴを5回タップしてください</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
